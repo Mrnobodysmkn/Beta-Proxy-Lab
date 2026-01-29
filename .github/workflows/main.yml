@@ -1,4 +1,4 @@
-name: Golden Hybrid - Browser Mode
+name: Golden Hybrid - Tunnel Mode
 
 permissions:
   contents: write
@@ -38,15 +38,12 @@ jobs:
         import concurrent.futures
         import random
         import urllib3
+        from urllib.parse import quote
         
-        # غیرفعال کردن اخطارهای امنیتی SSL
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
-        # --- هدرهای فریبنده (مثل مرورگر کروم) ---
         HEADERS = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
         }
 
         SOURCES = [
@@ -60,6 +57,35 @@ jobs:
 
         def encode_vmess(data_dict):
             return 'vmess://' + base64.b64encode(json.dumps(data_dict).encode('utf-8')).decode('utf-8')
+
+        # --- تابع جدید: دانلود هوشمند با واسطه ---
+        def smart_fetch(source):
+            url = source['url']
+            tag = source['tag']
+            print(f"\nTargeting: {tag} -> {url}")
+            
+            # لیست روش‌های دانلود (مستقیم + واسطه‌ها)
+            fetch_methods = [
+                {'name': 'Direct', 'url': url},
+                {'name': 'CorsProxy', 'url': f'https://corsproxy.io/?{quote(url)}'},
+                {'name': 'AllOrigins', 'url': f'https://api.allorigins.win/raw?url={quote(url)}'},
+                {'name': 'ThingProxy', 'url': f'https://thingproxy.freeboard.io/fetch/{url}'}
+            ]
+            
+            for method in fetch_methods:
+                print(f"  Trying method: {method['name']}...")
+                try:
+                    resp = requests.get(method['url'], headers=HEADERS, timeout=15, verify=False)
+                    if resp.status_code == 200 and len(resp.text) > 10:
+                        print(f"  ✅ Success via {method['name']}! (Size: {len(resp.text)})")
+                        return resp.text.strip()
+                    else:
+                        print(f"  ❌ Failed (Status: {resp.status_code})")
+                except Exception as e:
+                    print(f"  ❌ Error: {e}")
+            
+            print(f"  ⚠️ All methods failed for {tag}")
+            return None
 
         def process_config(line, source_tag):
             configs = []
@@ -102,10 +128,8 @@ jobs:
                     
                     if not is_candidate and source_tag != 'skimia': return []
 
-                # اضافه کردن نسخه اصلی
                 configs.append({'uri': line, 'tag': source_tag, 'proto': protocol})
 
-                # پورت هاپینگ برای اسکیمیا
                 if is_candidate and source_tag == 'skimia' and current_port > 0:
                     for port in CF_PORTS:
                         if port == current_port: continue
@@ -131,59 +155,35 @@ jobs:
                 return []
             return configs
 
-        print('Fetching & Processing...')
+        print('Starting Operation...')
         raw_list = []
         
         for src in SOURCES:
-            print(f"--- Fetching {src['tag']} from {src['url']} ---")
-            try:
-                # استفاده از هدرهای مرورگر و غیرفعال کردن وریفای SSL
-                resp = requests.get(src['url'], headers=HEADERS, timeout=20, verify=False)
-                
-                print(f"Status Code: {resp.status_code}")
-                
-                if resp.status_code != 200:
-                    print(f"FAILED! Server returned error code.")
-                    continue
-                    
-                text = resp.text.strip()
-                print(f"Content Length: {len(text)}")
-                
-                # اگر خالی بود
-                if not text:
-                    print("WARNING: Received empty body!")
-                    continue
-                    
-                # تلاش برای دیکد (Base64)
-                if 'vmess://' not in text and 'vless://' not in text:
-                    try:
-                        cleaned = text.replace(' ', '').replace('\n', '')
-                        decoded = base64.b64decode(cleaned).decode('utf-8', errors='ignore')
-                        text = decoded
-                        print("Base64 decoding successful.")
-                    except:
-                        print("Base64 decoding failed, trying regex extraction...")
-                
-                # استخراج با Regex (روش نهایی برای وقتی که فایل به هم ریخته است)
-                # پیدا کردن تمام خطوطی که با vmess/vless شروع میشوند
-                found_links = re.findall(r'(vmess://[a-zA-Z0-9+/=]+|vless://[^\s\n]+|trojan://[^\s\n]+|ss://[^\s\n]+)', text)
-                
-                if found_links:
-                    print(f"Extracted {len(found_links)} links via Regex.")
-                    for link in found_links:
-                        raw_list.append((link, src['tag']))
-                else:
-                    # اگر Regex هم چیزی پیدا نکرد، خط به خط اضافه کن (شاید فرمت ساده باشد)
-                    lines = text.splitlines()
-                    valid_lines = [l.strip() for l in lines if l.strip() and '://' in l]
-                    print(f"Found {len(valid_lines)} valid lines manually.")
-                    for line in valid_lines:
-                        raw_list.append((line, src['tag']))
+            text = smart_fetch(src)
+            if not text: continue
 
-            except Exception as e:
-                print(f"EXCEPTION: {e}")
+            # تلاش برای دیکد (Base64)
+            if 'vmess://' not in text and 'vless://' not in text:
+                try:
+                    cleaned = text.replace(' ', '').replace('\n', '')
+                    decoded = base64.b64decode(cleaned).decode('utf-8', errors='ignore')
+                    text = decoded
+                except: pass
+            
+            # استخراج با Regex (ضد گلوله)
+            found_links = re.findall(r'(vmess://[a-zA-Z0-9+/=]+|vless://[^\s\n]+|trojan://[^\s\n]+|ss://[^\s\n]+)', text)
+            
+            if found_links:
+                print(f"  -> Extracted {len(found_links)} valid links.")
+                for link in found_links:
+                    raw_list.append((link, src['tag']))
+            else:
+                lines = text.splitlines()
+                valid = [l.strip() for l in lines if l.strip() and '://' in l]
+                print(f"  -> Found {len(valid)} lines manually.")
+                for line in valid:
+                    raw_list.append((line, src['tag']))
 
-        # پردازش نهایی
         with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
             results = executor.map(lambda p: process_config(p[0], p[1]), raw_list)
             for res in results:
@@ -191,14 +191,12 @@ jobs:
 
         print(f'Total Generated: {len(FINAL_CONFIGS)}')
 
-        # ذخیره
         skimia_lines = [c['uri'] for c in FINAL_CONFIGS if c['tag'] == 'skimia']
         print(f"Skimia Final Count: {len(skimia_lines)}")
         
-        # اگر باز هم خالی بود، یک خط خطا بنویس تا بفهمیم
-        if not skimia_lines and any(s['tag'] == 'skimia' for s in SOURCES):
+        if not skimia_lines:
              with open('golden_skimia.txt', 'w') as f:
-                 f.write("# Error: Could not fetch proxies. Check Actions Log for details.")
+                 f.write(f"# Critical Error: Even Tunneling failed. Check source link validity.")
         else:
             with open('golden_skimia.txt', 'w', encoding='utf-8') as f:
                 f.write('\n'.join(skimia_lines))
@@ -217,5 +215,5 @@ jobs:
         git config --global user.name "Lab Rat"
         git config --global user.email "lab@github.com"
         git add golden_*.txt
-        git commit -m "Browser Mimic Mode Activated" || echo "No changes"
+        git commit -m "Tunnel Mode Activated" || echo "No changes"
         git push
