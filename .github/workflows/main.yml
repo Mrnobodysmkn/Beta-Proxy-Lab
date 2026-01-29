@@ -1,4 +1,4 @@
-name: Golden Hybrid - Tunnel Mode
+name: Golden Hybrid - Smart Validator
 
 permissions:
   contents: write
@@ -42,8 +42,13 @@ jobs:
         
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         
+        # هدرهای خیلی واقعی‌تر برای فریب آنتی‌بات‌ها
         HEADERS = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/plain,application/json,text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://www.google.com/',
+            'Cache-Control': 'no-cache',
         }
 
         SOURCES = [
@@ -58,39 +63,72 @@ jobs:
         def encode_vmess(data_dict):
             return 'vmess://' + base64.b64encode(json.dumps(data_dict).encode('utf-8')).decode('utf-8')
 
-        # --- تابع جدید: دانلود هوشمند با واسطه ---
+        # --- تابع حیاتی: اعتبارسنجی محتوا ---
+        def is_valid_content(text):
+            if not text or len(text) < 10: return False
+            # اگر HTML باشد یعنی اشتباه است
+            if text.strip().startswith('<!DOCTYPE') or text.strip().startswith('<html'):
+                return False
+            # باید حتما نشانه‌های پروکسی داشته باشد
+            if 'vmess://' in text or 'vless://' in text or 'trojan://' in text or 'ss://' in text:
+                return True
+            # شاید کل فایل بیس۶۴ باشد، تست میکنیم
+            try:
+                decoded = base64.b64decode(text).decode('utf-8', errors='ignore')
+                if 'vmess://' in decoded or 'vless://' in decoded:
+                    return True
+            except: pass
+            return False
+
+        # --- دانلود هوشمند با تونل‌های جدید ---
         def smart_fetch(source):
             url = source['url']
             tag = source['tag']
-            print(f"\nTargeting: {tag} -> {url}")
+            print(f"\n🔍 Targeting: {tag} -> {url}")
             
-            # لیست روش‌های دانلود (مستقیم + واسطه‌ها)
-            fetch_methods = [
+            # لیست روش‌های دانلود (اولویت با روش‌های مستقیم‌تر)
+            methods = [
+                # 1. مستقیم
                 {'name': 'Direct', 'url': url},
-                {'name': 'CorsProxy', 'url': f'https://corsproxy.io/?{quote(url)}'},
-                {'name': 'AllOrigins', 'url': f'https://api.allorigins.win/raw?url={quote(url)}'},
-                {'name': 'ThingProxy', 'url': f'https://thingproxy.freeboard.io/fetch/{url}'}
+                # 2. سرویس AllOrigins (خروجی خام JSON) - معمولا کمتر بلاک میشه
+                {'name': 'AllOrigins', 'url': f'https://api.allorigins.win/get?url={quote(url)}', 'json_extract': True},
+                # 3. سرویس Weserv (کش گوگل)
+                {'name': 'Weserv', 'url': f'https://images.weserv.nl/?url={quote(url)}&output=json', 'json_extract': False}, 
+                # 4. سرویس Https://cors-anywhere.herokuapp.com (گاهی کار میکنه)
+                # {'name': 'CorsAnywhere', 'url': f'https://cors-anywhere.herokuapp.com/{url}'},
             ]
             
-            for method in fetch_methods:
-                print(f"  Trying method: {method['name']}...")
+            for method in methods:
+                print(f"  👉 Trying: {method['name']}...")
                 try:
                     resp = requests.get(method['url'], headers=HEADERS, timeout=15, verify=False)
-                    if resp.status_code == 200 and len(resp.text) > 10:
-                        print(f"  ✅ Success via {method['name']}! (Size: {len(resp.text)})")
-                        return resp.text.strip()
+                    content = ""
+                    
+                    if method.get('json_extract'):
+                        # برای AllOrigins که خروجی JSON میده
+                        try:
+                            json_data = resp.json()
+                            content = json_data.get('contents', '')
+                        except: content = resp.text
                     else:
-                        print(f"  ❌ Failed (Status: {resp.status_code})")
+                        content = resp.text
+
+                    # **مهمترین بخش: چک کردن اعتبار**
+                    if is_valid_content(content):
+                        print(f"  ✅ SUCCESS! Valid content received ({len(content)} chars).")
+                        return content
+                    else:
+                        print(f"  ❌ Failed: Content was invalid (HTML or Empty).")
+                        
                 except Exception as e:
                     print(f"  ❌ Error: {e}")
             
-            print(f"  ⚠️ All methods failed for {tag}")
+            print(f"  ⚠️ All fetch methods failed for {tag}")
             return None
 
         def process_config(line, source_tag):
             configs = []
             original_config = {'uri': line, 'tag': source_tag, 'proto': 'unknown'}
-            
             try:
                 line = line.strip()
                 if not line: return []
@@ -114,9 +152,7 @@ jobs:
                     except:
                         if source_tag == 'skimia': return [original_config]
                         return []
-                    
-                    if data.get('net') not in ['ws', 'grpc'] and data.get('tls') != 'tls' and source_tag != 'skimia':
-                        return []
+                    if data.get('net') not in ['ws', 'grpc'] and data.get('tls') != 'tls' and source_tag != 'skimia': return []
 
                 elif line.startswith('vless://'):
                     protocol = 'vless'
@@ -125,7 +161,6 @@ jobs:
                         current_port = int(match.group(1))
                         if 'security=tls' in line or 'type=ws' in line or 'security=reality' in line:
                             is_candidate = True
-                    
                     if not is_candidate and source_tag != 'skimia': return []
 
                 configs.append({'uri': line, 'tag': source_tag, 'proto': protocol})
@@ -149,54 +184,48 @@ jobs:
                                 else: new_line += f"#{port}"
                                 configs.append({'uri': new_line, 'tag': source_tag, 'proto': 'vless'})
                         except: continue
-
             except:
                 if source_tag == 'skimia': return [original_config]
                 return []
             return configs
 
-        print('Starting Operation...')
+        print('Starting Smart Validator...')
         raw_list = []
         
         for src in SOURCES:
             text = smart_fetch(src)
             if not text: continue
 
-            # تلاش برای دیکد (Base64)
+            # اگر کل متن بیس۶۴ بود
             if 'vmess://' not in text and 'vless://' not in text:
                 try:
                     cleaned = text.replace(' ', '').replace('\n', '')
                     decoded = base64.b64decode(cleaned).decode('utf-8', errors='ignore')
-                    text = decoded
+                    if 'vmess://' in decoded or 'vless://' in decoded:
+                        text = decoded
                 except: pass
             
-            # استخراج با Regex (ضد گلوله)
+            # استخراج
             found_links = re.findall(r'(vmess://[a-zA-Z0-9+/=]+|vless://[^\s\n]+|trojan://[^\s\n]+|ss://[^\s\n]+)', text)
-            
             if found_links:
-                print(f"  -> Extracted {len(found_links)} valid links.")
-                for link in found_links:
-                    raw_list.append((link, src['tag']))
+                print(f"  -> Extracted {len(found_links)} links.")
+                for link in found_links: raw_list.append((link, src['tag']))
             else:
                 lines = text.splitlines()
                 valid = [l.strip() for l in lines if l.strip() and '://' in l]
                 print(f"  -> Found {len(valid)} lines manually.")
-                for line in valid:
-                    raw_list.append((line, src['tag']))
+                for line in valid: raw_list.append((line, src['tag']))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
             results = executor.map(lambda p: process_config(p[0], p[1]), raw_list)
-            for res in results:
-                FINAL_CONFIGS.extend(res)
+            for res in results: FINAL_CONFIGS.extend(res)
 
         print(f'Total Generated: {len(FINAL_CONFIGS)}')
 
         skimia_lines = [c['uri'] for c in FINAL_CONFIGS if c['tag'] == 'skimia']
-        print(f"Skimia Final Count: {len(skimia_lines)}")
-        
         if not skimia_lines:
              with open('golden_skimia.txt', 'w') as f:
-                 f.write(f"# Critical Error: Even Tunneling failed. Check source link validity.")
+                 f.write(f"# Critical: All tunnels failed or blocked. Check Action Logs.")
         else:
             with open('golden_skimia.txt', 'w', encoding='utf-8') as f:
                 f.write('\n'.join(skimia_lines))
@@ -215,5 +244,5 @@ jobs:
         git config --global user.name "Lab Rat"
         git config --global user.email "lab@github.com"
         git add golden_*.txt
-        git commit -m "Tunnel Mode Activated" || echo "No changes"
+        git commit -m "Smart Validator Mode" || echo "No changes"
         git push
