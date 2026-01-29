@@ -1,1 +1,199 @@
+name: Golden Hybrid Proxy Lab
+
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: '0 */2 * * *' # هر ۲ ساعت
+  workflow_dispatch:
+
+jobs:
+  laboratory:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v3
+
+    - name: Setup Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Install Dependencies
+      run: |
+        pip install requests
+
+    - name: Run The Alchemist Script
+      run: |
+        # پاکسازی فایل‌های قبلی
+        rm -f golden_*.txt
+        
+        cat << 'EOF' > alchemist.py
+        import requests
+        import base64
+        import json
+        import re
+        import copy
+        import concurrent.futures
+        
+        # --- منابع ---
+        SOURCES = [
+            {'url': 'https://chat.tawana.online/sub/tawanaproxy.txt', 'tag': 'skimia'},
+            {'url': 'https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/EternityAirports_sub.txt', 'tag': 'public'},
+            {'url': 'https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/main/all_extracted_configs.txt', 'tag': 'public'},
+        ]
+
+        # پورت‌های معروف کلادفلر که معمولا در ایران بازتر هستند
+        CF_PORTS = [443, 2053, 2083, 8443, 2096]
+        
+        # کانفیگ‌های خروجی
+        FINAL_CONFIGS = []
+
+        def get_flag(country_code):
+            if not country_code: return '🚩'
+            return chr(127397 + ord(country_code[0])) + chr(127397 + ord(country_code[1]))
+
+        # تابع کمکی برای اینکود مجدد Vmess
+        def encode_vmess(data_dict):
+            json_str = json.dumps(data_dict)
+            return 'vmess://' + base64.b64encode(json_str.encode('utf-8')).decode('utf-8')
+
+        # پردازش و "اصلاح ژنتیکی" کانفیگ
+        def process_config(line, source_tag):
+            configs = []
+            try:
+                # 1. استخراج اطلاعات اولیه
+                data = None
+                protocol = ''
+                
+                if line.startswith('vmess://'):
+                    protocol = 'vmess'
+                    b64 = line[8:]
+                    padding = len(b64) % 4
+                    if padding: b64 += '=' * (4 - padding)
+                    data = json.loads(base64.b64decode(b64).decode('utf-8', errors='ignore'))
+                    
+                    # فیلتر سخت‌گیرانه: اگر TLS ندارد، دور بریز (مگر اینکه اسکیمیا باشد)
+                    if data.get('net') not in ['ws', 'grpc'] and data.get('tls') != 'tls' and source_tag != 'skimia':
+                        return []
+                        
+                elif line.startswith('vless://'):
+                    protocol = 'vless'
+                    # پارس کردن ساده برای بررسی امنیت
+                    if 'security=reality' in line:
+                        protocol = 'vless-reality'
+                    elif 'security=tls' in line:
+                        protocol = 'vless-tls'
+                    elif source_tag != 'skimia':
+                        return [] # اگر امن نیست و مال خودمان نیست، حذف
+                
+                else:
+                    return [] # بقیه پروتکل‌ها فعلا حذف برای تمرکز روی کیفیت
+
+                # 2. تکنیک Port Hopping (تکثیر روی پورت‌های دیگر)
+                # اگر کانفیگ WS/TLS است، احتمالا پشت CDN است و می‌توان پورت را عوض کرد
+                base_configs = [line]
+                
+                # شرط پورت هاپینگ: پروتکل Vmess-WS یا Vless-WS باشد
+                is_candidate = False
+                current_port = 0
+                
+                if protocol == 'vmess' and data.get('net') == 'ws':
+                    is_candidate = True
+                    current_port = int(data['port'])
+                elif 'type=ws' in line or 'security=tls' in line:
+                    # استخراج پورت برای vless
+                    match = re.search(r':(\d+)\?', line)
+                    if match:
+                        current_port = int(match.group(1))
+                        is_candidate = True
+
+                if is_candidate and source_tag == 'skimia': # فعلا فقط روی لینک‌های اسکیمیا اجرا کنیم که خرابکاری نشود
+                    # ساخت کپی از پورت‌های دیگر
+                    for port in CF_PORTS:
+                        if port == current_port: continue
+                        
+                        if protocol == 'vmess':
+                            new_data = copy.deepcopy(data)
+                            new_data['port'] = port
+                            new_data['ps'] = f"{new_data['ps']}-Port{port}"
+                            base_configs.append(encode_vmess(new_data))
+                        
+                        elif protocol.startswith('vless'):
+                            # جایگزینی پورت در رشته با Regex
+                            new_line = re.sub(r':(\d+)\?', f':{port}?', line, 1)
+                            new_line += f"#{port}" # افزودن تگ به نام
+                            base_configs.append(new_line)
+
+                # 3. نهایی سازی
+                for cfg in base_configs:
+                    configs.append({
+                        'uri': cfg,
+                        'tag': source_tag,
+                        'proto': protocol
+                    })
+                    
+            except Exception as e:
+                pass
+                
+            return configs
+
+        # --- اجرای اصلی ---
+        print('Fetching & Processing...')
+        
+        raw_list = []
+        for src in SOURCES:
+            try:
+                resp = requests.get(src['url'], timeout=10)
+                text = resp.text
+                # دیکد اگر کل فایل Base64 باشد
+                if 'vmess://' not in text and 'vless://' not in text:
+                    try:
+                        text = base64.b64decode(text).decode('utf-8', errors='ignore')
+                    except: pass
+                
+                for line in text.splitlines():
+                    if line.strip():
+                        raw_list.append((line.strip(), src['tag']))
+            except: pass
+
+        # پردازش موازی
+        with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
+            results = executor.map(lambda p: process_config(p[0], p[1]), raw_list)
+            for res in results:
+                FINAL_CONFIGS.extend(res)
+
+        # دریافت GeoIP برای کانفیگ‌های نهایی
+        print(f'Total candidates: {len(FINAL_CONFIGS)}')
+        
+        # استخراج IP ها برای GeoIP
+        # (این بخش ساده شده تا کد خیلی طولانی نشود، فرض میکنیم نام‌ها اصلاح شده‌اند)
+        
+        # ذخیره سازی
+        # فایل مخصوص اسکیمیا (با پورت‌های تکثیر شده)
+        skimia_lines = [c['uri'] for c in FINAL_CONFIGS if c['tag'] == 'skimia']
+        with open('golden_skimia.txt', 'w') as f:
+            f.write('\n'.join(skimia_lines))
+            
+        # فایل عمومی فقط امن‌ها
+        public_lines = [c['uri'] for c in FINAL_CONFIGS if c['tag'] == 'public']
+        # شافل کردن برای تنوع
+        import random
+        random.shuffle(public_lines)
+        with open('golden_public_secure.txt', 'w') as f:
+            f.write('\n'.join(public_lines[:100])) # فقط ۱۰۰ تا
+
+        EOF
+        
+        python3 alchemist.py
+
+    - name: Commit and Push
+      run: |
+        git config --global user.name "Lab Rat"
+        git config --global user.email "lab@github.com"
+        git add golden_*.txt
+        git commit -m "New experimental formulas" || echo "No changes"
+        git push
 
