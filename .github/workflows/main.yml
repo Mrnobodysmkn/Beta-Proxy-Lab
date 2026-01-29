@@ -1,4 +1,4 @@
-name: Golden Hybrid Proxy Lab (Safe Mode)
+name: Golden Hybrid - Browser Mode
 
 permissions:
   contents: write
@@ -23,7 +23,7 @@ jobs:
 
     - name: Install Dependencies
       run: |
-        pip install requests
+        pip install requests urllib3
 
     - name: Run The Alchemist Script
       run: |
@@ -37,7 +37,18 @@ jobs:
         import copy
         import concurrent.futures
         import random
+        import urllib3
         
+        # غیرفعال کردن اخطارهای امنیتی SSL
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
+        # --- هدرهای فریبنده (مثل مرورگر کروم) ---
+        HEADERS = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+        }
+
         SOURCES = [
             {'url': 'https://chat.tawana.online/sub/tawanaproxy.txt', 'tag': 'skimia'},
             {'url': 'https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/EternityAirports_sub.txt', 'tag': 'public'},
@@ -52,7 +63,6 @@ jobs:
 
         def process_config(line, source_tag):
             configs = []
-            # ذخیره نسخه اصلی برای روز مبادا (Fallback)
             original_config = {'uri': line, 'tag': source_tag, 'proto': 'unknown'}
             
             try:
@@ -64,126 +74,134 @@ jobs:
                 is_candidate = False
                 current_port = 0
                 
-                # --- تلاش برای پارس کردن ---
                 if line.startswith('vmess://'):
                     protocol = 'vmess'
                     b64 = line[8:]
                     padding = len(b64) % 4
                     if padding: b64 += '=' * (4 - padding)
-                    
                     try:
                         decoded = base64.b64decode(b64).decode('utf-8', errors='ignore')
                         data = json.loads(decoded)
+                        if data.get('net') == 'ws':
+                            is_candidate = True
+                            current_port = int(data.get('port', 0))
                     except:
-                        # اگر دیکد نشد، اگر مال اسکیمیاست برش گردان، وگرنه حذف
                         if source_tag == 'skimia': return [original_config]
                         return []
-
-                    # فیلتر امنیتی (برای عمومی‌ها)
+                    
                     if data.get('net') not in ['ws', 'grpc'] and data.get('tls') != 'tls' and source_tag != 'skimia':
                         return []
-                    
-                    if data.get('net') == 'ws':
-                        is_candidate = True
-                        current_port = int(data.get('port', 0))
 
                 elif line.startswith('vless://'):
                     protocol = 'vless'
-                    # پارس کردن پورت برای vless
                     match = re.search(r':(\d+)\?', line) or re.search(r'vless://.*?@.*?:(\d+)', line)
                     if match:
                         current_port = int(match.group(1))
-                        # شرط کاندید شدن: داشتن tls یا ws
                         if 'security=tls' in line or 'type=ws' in line or 'security=reality' in line:
                             is_candidate = True
                     
-                    # فیلتر امنیتی برای عمومی‌ها
-                    if not is_candidate and source_tag != 'skimia':
-                         return []
+                    if not is_candidate and source_tag != 'skimia': return []
 
-                # --- اگر پردازش موفق بود، نسخه اصلی را به لیست اضافه کن ---
+                # اضافه کردن نسخه اصلی
                 configs.append({'uri': line, 'tag': source_tag, 'proto': protocol})
 
-                # --- عملیات Port Hopping (فقط برای اسکیمیا) ---
+                # پورت هاپینگ برای اسکیمیا
                 if is_candidate and source_tag == 'skimia' and current_port > 0:
                     for port in CF_PORTS:
                         if port == current_port: continue
-                        
                         try:
                             if protocol == 'vmess' and data:
                                 new_data = copy.deepcopy(data)
                                 new_data['port'] = port
                                 new_data['ps'] = f"{new_data.get('ps', 'config')}-P{port}"
                                 configs.append({'uri': encode_vmess(new_data), 'tag': source_tag, 'proto': 'vmess'})
-                            
                             elif protocol == 'vless':
-                                # تغییر پورت در URL با Regex
-                                # الگوی ۱: :port?
                                 new_line = re.sub(r':(\d+)\?', f':{port}?', line, 1)
-                                if new_line == line: 
-                                    # الگوی ۲: انتهای آدرس بدون پارامتر
-                                    new_line = re.sub(r':(\d+)$', f':{port}', line, 1)
-                                    # الگوی ۳: قبل از #
-                                    new_line = re.sub(r':(\d+)#', f':{port}#', line, 1)
-                                
-                                # تغییر نام (بعد از #)
+                                if new_line == line: new_line = re.sub(r':(\d+)$', f':{port}', line, 1)
+                                new_line = re.sub(r':(\d+)#', f':{port}#', line, 1)
                                 if '#' in new_line:
                                     parts = new_line.split('#')
                                     new_line = f"{parts[0]}#{parts[1]}-P{port}"
-                                else:
-                                    new_line += f"#{port}"
-                                    
+                                else: new_line += f"#{port}"
                                 configs.append({'uri': new_line, 'tag': source_tag, 'proto': 'vless'})
-                        except:
-                            continue # اگر ساخت کپی شکست خورد، ادامه بده
+                        except: continue
 
-            except Exception as e:
-                # اگر هر خطایی رخ داد، اما لینک مال اسکیمیا بود، نسخه اصلی را حفظ کن
-                if source_tag == 'skimia':
-                    return [original_config]
+            except:
+                if source_tag == 'skimia': return [original_config]
                 return []
-                
             return configs
 
         print('Fetching & Processing...')
         raw_list = []
+        
         for src in SOURCES:
+            print(f"--- Fetching {src['tag']} from {src['url']} ---")
             try:
-                print(f"Downloading {src['tag']}...")
-                resp = requests.get(src['url'], timeout=15)
-                text = resp.text.strip()
+                # استفاده از هدرهای مرورگر و غیرفعال کردن وریفای SSL
+                resp = requests.get(src['url'], headers=HEADERS, timeout=20, verify=False)
                 
-                # دیکد فایل سابسکرایب (Base64)
+                print(f"Status Code: {resp.status_code}")
+                
+                if resp.status_code != 200:
+                    print(f"FAILED! Server returned error code.")
+                    continue
+                    
+                text = resp.text.strip()
+                print(f"Content Length: {len(text)}")
+                
+                # اگر خالی بود
+                if not text:
+                    print("WARNING: Received empty body!")
+                    continue
+                    
+                # تلاش برای دیکد (Base64)
                 if 'vmess://' not in text and 'vless://' not in text:
                     try:
-                        # تلاش برای تمیز کردن و دیکد
-                        cleaned_text = text.replace(' ', '').replace('\n', '')
-                        decoded_text = base64.b64decode(cleaned_text).decode('utf-8', errors='ignore')
-                        text = decoded_text
+                        cleaned = text.replace(' ', '').replace('\n', '')
+                        decoded = base64.b64decode(cleaned).decode('utf-8', errors='ignore')
+                        text = decoded
+                        print("Base64 decoding successful.")
                     except:
-                        pass # شاید فایل متنی ساده باشد
+                        print("Base64 decoding failed, trying regex extraction...")
                 
-                lines = text.splitlines()
-                print(f"Source {src['tag']} lines: {len(lines)}")
-                for line in lines:
-                    if line.strip():
-                        raw_list.append((line.strip(), src['tag']))
-            except Exception as e:
-                print(f"Error fetching {src['url']}: {e}")
+                # استخراج با Regex (روش نهایی برای وقتی که فایل به هم ریخته است)
+                # پیدا کردن تمام خطوطی که با vmess/vless شروع میشوند
+                found_links = re.findall(r'(vmess://[a-zA-Z0-9+/=]+|vless://[^\s\n]+|trojan://[^\s\n]+|ss://[^\s\n]+)', text)
+                
+                if found_links:
+                    print(f"Extracted {len(found_links)} links via Regex.")
+                    for link in found_links:
+                        raw_list.append((link, src['tag']))
+                else:
+                    # اگر Regex هم چیزی پیدا نکرد، خط به خط اضافه کن (شاید فرمت ساده باشد)
+                    lines = text.splitlines()
+                    valid_lines = [l.strip() for l in lines if l.strip() and '://' in l]
+                    print(f"Found {len(valid_lines)} valid lines manually.")
+                    for line in valid_lines:
+                        raw_list.append((line, src['tag']))
 
+            except Exception as e:
+                print(f"EXCEPTION: {e}")
+
+        # پردازش نهایی
         with concurrent.futures.ThreadPoolExecutor(max_workers=50) as executor:
             results = executor.map(lambda p: process_config(p[0], p[1]), raw_list)
             for res in results:
                 FINAL_CONFIGS.extend(res)
 
-        print(f'Total Configs Generated: {len(FINAL_CONFIGS)}')
+        print(f'Total Generated: {len(FINAL_CONFIGS)}')
 
-        # ذخیره فایل‌ها
+        # ذخیره
         skimia_lines = [c['uri'] for c in FINAL_CONFIGS if c['tag'] == 'skimia']
         print(f"Skimia Final Count: {len(skimia_lines)}")
         
-        with open('golden_skimia.txt', 'w', encoding='utf-8') as f:
-            f.write('\n'.join(skimia_lines))
+        # اگر باز هم خالی بود، یک خط خطا بنویس تا بفهمیم
+        if not skimia_lines and any(s['tag'] == 'skimia' for s in SOURCES):
+             with open('golden_skimia.txt', 'w') as f:
+                 f.write("# Error: Could not fetch proxies. Check Actions Log for details.")
+        else:
+            with open('golden_skimia.txt', 'w', encoding='utf-8') as f:
+                f.write('\n'.join(skimia_lines))
             
         public_lines = [c['uri'] for c in FINAL_CONFIGS if c['tag'] == 'public']
         random.shuffle(public_lines)
@@ -199,5 +217,5 @@ jobs:
         git config --global user.name "Lab Rat"
         git config --global user.email "lab@github.com"
         git add golden_*.txt
-        git commit -m "Fix parsing issue with fallback" || echo "No changes"
+        git commit -m "Browser Mimic Mode Activated" || echo "No changes"
         git push
